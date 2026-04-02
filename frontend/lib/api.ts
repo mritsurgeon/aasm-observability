@@ -25,6 +25,9 @@ export const api = {
     get<TimelineData>(`/timeline${agentId ? `?agent_id=${encodeURIComponent(agentId)}&limit=${limit}` : `?limit=${limit}`}`),
   sessionTrace:  (sessionId: string) => get<TimelineSession>(`/timeline/${encodeURIComponent(sessionId)}`),
   graphOverview: (limit = 200) => get<GraphData>(`/graph/overview?limit=${limit}`),
+  graphAgents:          () => get<GraphData>("/graph/agents"),
+  graphAgentSessions:   (agentId: string) => get<GraphData>(`/graph/agent/${encodeURIComponent(agentId)}/sessions`),
+  graphSessionResources:(sessionId: string) => get<GraphData>(`/graph/session/${encodeURIComponent(sessionId)}/resources`),
   graphAgent:    (agentId: string) => get<GraphData>(`/graph/agent/${encodeURIComponent(agentId)}`),
   graphSchema:   () => get<GraphSchema>("/graph/schema"),
   heatmap:       (buckets = 12, bucketMinutes = 5) =>
@@ -69,7 +72,7 @@ export interface TimelineData {
 
 export interface GraphNode {
   id:      string;
-  label:   "Agent" | "Session" | "Tool" | "LLMModel" | "ExternalSystem" | "Namespace";
+  label:   "Agent" | "Session" | "Tool" | "LLMModel" | "ExternalSystem" | "Namespace" | "Memory" | "VectorDB";
   display: string;
   data:    Record<string, unknown>;
 }

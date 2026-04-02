@@ -213,6 +213,139 @@ async def graph_agent(agent_id: str):
     }
 
 
+@router.get("/agents")
+async def graph_agents():
+    """
+    Level-0 entry point: returns only :Agent nodes.
+    Mandatory starting state to prevent initial graph congestion.
+    """
+    neo4j = await get_neo4j()
+    if not neo4j:
+        return {"nodes": [], "edges": [], "error": "Neo4j unavailable"}
+
+    nodes: dict[str, dict] = {}
+
+    async with neo4j.session() as s:
+        res = await s.run("MATCH (a:Agent) RETURN a")
+        async for record in res:
+            _add_node(nodes, record["a"], "Agent")
+
+    return {
+        "nodes": list(nodes.values()),
+        "edges": [],
+        "counts": {"nodes": len(nodes), "edges": 0},
+    }
+
+
+@router.get("/agent/{agent_id}/sessions")
+async def graph_agent_sessions(agent_id: str):
+    """
+    Drill-down Level 1: Agent + its direct :Session neighbours.
+    Called when the user clicks an :Agent node.
+    """
+    neo4j = await get_neo4j()
+    if not neo4j:
+        raise HTTPException(503, detail="Neo4j unavailable")
+
+    nodes: dict[str, dict] = {}
+    edges: list[dict] = []
+
+    async with neo4j.session() as s:
+        res = await s.run(
+            """
+            MATCH (a:Agent {agent_id: $agent_id})
+            OPTIONAL MATCH (a)-[:RUNS]->(sess:Session)
+            RETURN a, sess
+            """,
+            agent_id=agent_id,
+        )
+        found = False
+        async for record in res:
+            found = True
+            _add_node(nodes, record["a"], "Agent")
+            if record["sess"]:
+                _add_node(nodes, record["sess"], "Session")
+                edges.append(_edge(record["a"], record["sess"], "RUNS"))
+
+        if not found:
+            raise HTTPException(404, detail=f"Agent '{agent_id}' not found")
+
+    return {
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "counts": {"nodes": len(nodes), "edges": len(edges)},
+    }
+
+
+@router.get("/session/{session_id}/resources")
+async def graph_session_resources(session_id: str):
+    """
+    Drill-down Level 2: Session + all immediate execution dependencies
+    (Tool, LLMModel, ExternalSystem, Memory, VectorDB, Namespace).
+    Called when the user clicks a :Session node.
+    """
+    neo4j = await get_neo4j()
+    if not neo4j:
+        raise HTTPException(503, detail="Neo4j unavailable")
+
+    nodes: dict[str, dict] = {}
+    edges: list[dict] = []
+
+    async with neo4j.session() as s:
+        res = await s.run(
+            """
+            MATCH (sess:Session {session_id: $session_id})
+            OPTIONAL MATCH (sess)-[:CALLS]->(t:Tool)
+            OPTIONAL MATCH (t)-[:IN_NAMESPACE]->(ns:Namespace)
+            OPTIONAL MATCH (sess)-[:CALLS]->(m:LLMModel)
+            OPTIONAL MATCH (sess)-[:CONNECTS_TO]->(ext:ExternalSystem)
+            OPTIONAL MATCH (sess)-[:WRITES]->(mem:Memory)
+            OPTIONAL MATCH (sess)-[:QUERIES]->(v:VectorDB)
+            RETURN sess, t, ns, m, ext, mem, v
+            """,
+            session_id=session_id,
+        )
+        found = False
+        async for record in res:
+            found = True
+            _add_node(nodes, record["sess"], "Session")
+            if record["t"]:
+                _add_node(nodes, record["t"], "Tool")
+                edges.append(_edge(record["sess"], record["t"], "CALLS"))
+            if record["ns"] and record["t"]:
+                _add_node(nodes, record["ns"], "Namespace")
+                edges.append(_edge(record["t"], record["ns"], "IN_NAMESPACE"))
+            if record["m"]:
+                _add_node(nodes, record["m"], "LLMModel")
+                edges.append(_edge(record["sess"], record["m"], "CALLS"))
+            if record["ext"]:
+                _add_node(nodes, record["ext"], "ExternalSystem")
+                edges.append(_edge(record["sess"], record["ext"], "CONNECTS_TO"))
+            if record["mem"]:
+                _add_node(nodes, record["mem"], "Memory")
+                edges.append(_edge(record["sess"], record["mem"], "WRITES"))
+            if record["v"]:
+                _add_node(nodes, record["v"], "VectorDB")
+                edges.append(_edge(record["sess"], record["v"], "QUERIES"))
+
+        if not found:
+            raise HTTPException(404, detail=f"Session '{session_id}' not found")
+
+    # De-duplicate edges (OPTIONAL MATCH cartesian product can produce duplicates)
+    seen: set[tuple] = set()
+    unique_edges = []
+    for e in edges:
+        key = (e["source"], e["target"], e["type"])
+        if key not in seen:
+            seen.add(key)
+            unique_edges.append(e)
+
+    return {
+        "nodes": list(nodes.values()),
+        "edges": unique_edges,
+        "counts": {"nodes": len(nodes), "edges": len(unique_edges)},
+    }
+
 @router.get("/schema")
 async def graph_schema():
     """Count of each node label and relationship type — schema introspection."""
