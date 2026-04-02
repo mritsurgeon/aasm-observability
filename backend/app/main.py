@@ -11,6 +11,7 @@ from app.graph     import router as graph_router
 from app.timeline  import router as timeline_router
 from app.risk      import router as risk_router
 from app.heatmap   import router as heatmap_router
+from app.memory    import router as memory_router
 
 
 @asynccontextmanager
@@ -42,6 +43,7 @@ app.include_router(graph_router)
 app.include_router(timeline_router)
 app.include_router(risk_router)
 app.include_router(heatmap_router)
+app.include_router(memory_router)
 
 
 @app.get("/health")

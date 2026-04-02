@@ -83,6 +83,9 @@ function GraphNodeComponent({ data }: { data: Record<string, unknown> }) {
   const keyMeta     = getKeyMeta(label, data);
   const extras      = extraCount(label, data);
   const isCollapsed = !!data.isCollapsed;
+  const hasChildren = !!data.hasChildren;
+  const nodeId      = data.nodeId as string | undefined;
+  const onCollapse  = data.onCollapse as ((id: string) => void) | undefined;
 
   return (
     <div
@@ -125,13 +128,15 @@ function GraphNodeComponent({ data }: { data: Record<string, unknown> }) {
           {keyMeta}
         </div>
       )}
-      {isCollapsed && (
-        <div
-          className="mt-1 text-[9px] font-mono text-center rounded px-1 py-0.5 leading-none"
-          style={{ background: colors.border + "22", color: colors.border }}
+      {hasChildren && nodeId && onCollapse && (
+        <button
+          className="mt-1.5 w-full text-[9px] font-mono rounded px-1 py-0.5 text-center leading-none border transition-colors hover:opacity-90"
+          style={{ background: colors.border + "18", borderColor: colors.border + "55", color: colors.border }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onCollapse(nodeId); }}
         >
-          ▶ collapsed
-        </div>
+          {isCollapsed ? "⊕ expand" : "⊖ collapse"}
+        </button>
       )}
     </div>
   );
@@ -465,9 +470,11 @@ function computeVisibleGraph(
     visibleIds = new Set(allNodes.filter((n) => !hiddenIds.has(n.id)).map((n) => n.id));
   }
 
+  const nodesWithChildren = new Set(allEdges.map((e) => e.source));
+
   const visibleNodes = allNodes
     .filter((n) => visibleIds.has(n.id))
-    .map((n) => ({ ...n, data: { ...n.data, isCollapsed: collapsedNodes.has(n.id) } }));
+    .map((n) => ({ ...n, data: { ...n.data, isCollapsed: collapsedNodes.has(n.id), hasChildren: nodesWithChildren.has(n.id) } }));
 
   const visibleEdges = allEdges.filter(
     (e) => visibleIds.has(e.source) && visibleIds.has(e.target)
@@ -495,6 +502,15 @@ export function AgentGraph({ eventCount }: Props) {
   const [collapsedNodes, setCollapsedNodes]  = useState<Set<string>>(new Set());
   const [activeFilters, setActiveFilters]    = useState<Set<string>>(new Set());
   const [dataVersion, setDataVersion]        = useState(0);
+
+  const handleCollapse = useCallback((nodeId: string) => {
+    setCollapsedNodes((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -531,9 +547,12 @@ export function AgentGraph({ eventCount }: Props) {
       collapsedNodes,
       activeFilters,
     );
-    setRfNodes(visibleNodes);
+    setRfNodes(visibleNodes.map((n) => ({
+      ...n,
+      data: { ...n.data, nodeId: n.id, onCollapse: handleCollapse },
+    })));
     setRfEdges(visibleEdges);
-  }, [collapsedNodes, activeFilters, dataVersion, setRfNodes, setRfEdges]);
+  }, [collapsedNodes, activeFilters, dataVersion, handleCollapse, setRfNodes, setRfEdges]);
 
   if (loading) {
     return (
@@ -581,16 +600,11 @@ export function AgentGraph({ eventCount }: Props) {
                 opacity: activeFilters.size > 0 && !isActive ? 0.45 : 1,
               }}
               className="px-2 py-0.5 rounded border bg-gray-900/80 font-mono cursor-pointer transition-all hover:opacity-100 select-none"
-              onClick={(e) => {
+              onClick={() => {
                 setActiveFilters((prev) => {
                   const next = new Set(prev);
-                  if (e.shiftKey) {
-                    if (next.has(label)) next.delete(label);
-                    else next.add(label);
-                  } else {
-                    if (next.size === 1 && next.has(label)) next.clear();
-                    else { next.clear(); next.add(label); }
-                  }
+                  if (next.has(label)) next.delete(label);
+                  else next.add(label);
                   return next;
                 });
               }}
@@ -614,14 +628,6 @@ export function AgentGraph({ eventCount }: Props) {
         onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
         onNodeClick={(_, node) => setSelectedNode(node)}
         onPaneClick={() => setSelectedNode(null)}
-        onNodeDoubleClick={(_, node) => {
-          setCollapsedNodes((prev) => {
-            const next = new Set(prev);
-            if (next.has(node.id)) next.delete(node.id);
-            else next.add(node.id);
-            return next;
-          });
-        }}
         nodeTypes={nodeTypes}
         fitView fitViewOptions={{ padding: 0.15 }}
         minZoom={0.15} maxZoom={3}
@@ -638,7 +644,7 @@ export function AgentGraph({ eventCount }: Props) {
 
       <div className="absolute bottom-3 left-3 z-10 text-[10px] text-gray-600 font-mono space-x-3">
         <span>{counts.nodes} nodes · {counts.edges} edges</span>
-        <span className="text-gray-700">· click label to filter · dbl-click node to collapse</span>
+        <span className="text-gray-700">· click label to filter · click ⊖ on node to collapse</span>
       </div>
     </div>
   );

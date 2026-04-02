@@ -797,8 +797,20 @@ export default function Dashboard() {
             ) : hasData ? (
               <>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <StatCard label="Active Agents" value={agentIds.size}          accent="blue" />
-                  <StatCard label="Sessions"      value={sessionIds.size}        accent="blue" />
+                  <StatCard
+                    label="Active Agents"
+                    value={agentIds.size}
+                    accent="blue"
+                    active={activeFilter === null}
+                    onClick={() => setActiveFilter(null)}
+                  />
+                  <StatCard
+                    label="Sessions"
+                    value={sessionIds.size}
+                    accent="blue"
+                    active={activeFilter === null}
+                    onClick={() => setActiveFilter(null)}
+                  />
                   <StatCard
                     label="Tool Calls"
                     value={toolCallEvents.length}
