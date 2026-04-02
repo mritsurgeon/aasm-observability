@@ -309,10 +309,10 @@ async def _write_event(ev: EventIn) -> EventOut:
     }
     await event_bus.emit(ev.type, ws_payload)
 
-    return EventOut(
-        id=event_id, ingested_at=ingested_at,
-        **ev.model_dump(),
-    )
+    # Exclude fields that are set explicitly to avoid duplicate-kwarg TypeError.
+    # EventIn.id and ingested_at are either server-generated or passed directly.
+    ev_data = {k: v for k, v in ev.model_dump().items() if k not in ("id", "ingested_at")}
+    return EventOut(id=event_id, ingested_at=ingested_at, **ev_data)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

@@ -106,7 +106,63 @@ def init(
         from arsp_sdk._patches.requests_patch import patch_requests as _prq
         _prq(_client)
 
+    # ── Startup diagnostic (always prints — logging may not be configured) ────
+    _startup_check(_client)
+
     return _client
+
+
+def _startup_check(client: EventClient) -> None:
+    """
+    Synchronously verify the backend is reachable and print a clear
+    startup banner. Uses print() so it appears regardless of whether
+    the host application has configured Python logging.
+    """
+    import httpx as _httpx
+
+    # 1. Health check
+    reachable = False
+    try:
+        r = _httpx.get(f"{client.endpoint}/health", timeout=3.0)
+        reachable = r.status_code == 200
+    except Exception as exc:
+        _print_banner(client, reachable=False, error=str(exc))
+        return
+
+    if not reachable:
+        _print_banner(client, reachable=False, error="non-200 from /health")
+        return
+
+    # 2. Send a real test event synchronously so we know the ingest path works
+    event_id = client.send_sync(
+        type="api_call",
+        name="arsp_sdk_init",
+        metadata={"sdk_version": __version__, "agent_id": client.agent_id},
+    )
+    _print_banner(client, reachable=True, event_id=event_id)
+
+
+def _print_banner(
+    client: EventClient,
+    reachable: bool,
+    error: str = "",
+    event_id: Optional[str] = None,
+) -> None:
+    sep = "─" * 52
+    print(f"\n[arsp] {sep}")
+    print(f"[arsp]  ARSP SDK v{__version__}  —  agent: {client.agent_id}")
+    print(f"[arsp]  endpoint: {client.endpoint}")
+    if reachable:
+        print(f"[arsp]  backend:  ✓ reachable")
+        if event_id:
+            print(f"[arsp]  test event sent — id: {event_id}")
+        else:
+            print(f"[arsp]  WARNING: backend reachable but event POST failed")
+    else:
+        print(f"[arsp]  backend:  ✗ NOT reachable  ← events will be dropped!")
+        print(f"[arsp]  error:    {error}")
+        print(f"[arsp]  check:    is 'docker compose up' running?")
+    print(f"[arsp] {sep}\n")
 
 
 def new_session(session_id: Optional[str] = None) -> str:

@@ -14,14 +14,38 @@ log = logging.getLogger(__name__)
 
 
 def patch_chromadb(client: "EventClient") -> None:
+    Collection = _import_collection()
+    if Collection is None:
+        return
     try:
-        from chromadb.api.models.Collection import Collection
         _wrap_collection(client, Collection)
         log.info("[arsp] ChromaDB patched (add, query, get, delete)")
-    except ImportError:
-        log.debug("[arsp] chromadb not installed — skipping patch")
     except Exception as exc:
         log.warning("[arsp] ChromaDB patch failed: %s", exc)
+
+
+def _import_collection():
+    """Try every known import path across chromadb versions."""
+    # chromadb >= 0.4 (lowercase module name)
+    try:
+        from chromadb.api.models.collection import Collection
+        return Collection
+    except ImportError:
+        pass
+    # chromadb < 0.4 (capital C)
+    try:
+        from chromadb.api.models.Collection import Collection  # type: ignore[no-redef]
+        return Collection
+    except ImportError:
+        pass
+    # chromadb >= 0.5 async/sync split
+    try:
+        from chromadb.api.models.collection import Collection
+        return Collection
+    except ImportError:
+        pass
+    log.debug("[arsp] chromadb not installed — skipping patch")
+    return None
 
 
 def _wrap_collection(client: "EventClient", Collection) -> None:

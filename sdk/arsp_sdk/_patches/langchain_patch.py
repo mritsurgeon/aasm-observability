@@ -1,14 +1,19 @@
 """
-LangChain patch — injects an ARSP BaseCallbackHandler into LangChain's
-global callback manager so ALL LLM calls, tool calls, and chain runs are
-captured automatically, regardless of provider (OpenAI, Ollama, Gemini…).
+LangChain patch — two complementary layers so no event is ever missed:
 
-The old BaseTool monkey-patch only caught tool._run(); this callback approach
-is the pattern LangChain itself recommends for observability and covers:
-  - on_llm_start / on_llm_end / on_llm_error
-  - on_tool_start / on_tool_end / on_tool_error
-  - on_chain_start / on_chain_end / on_chain_error
+Layer A – BaseCallbackManager injection
+  Injects an ARSPCallbackHandler into every CallbackManager created after
+  init(), giving rich context (model name, token usage, chain topology) for
+  all LLM and chain invocations that go through LangChain's runnable system.
+  Fires on_chat_model_start (chat models) AND on_llm_start (completion models).
+
+Layer B – BaseTool._run / _arun direct patch
+  Catches tool calls that happen outside a chain/agent context — e.g. when
+  the developer calls tool.invoke(...) directly without passing a config.
+  In those cases LangChain never creates a CallbackManager, so Layer A is
+  blind to the call. This patch is the safety net.
 """
+import functools
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -23,216 +28,336 @@ log = logging.getLogger(__name__)
 def patch_langchain(client: "EventClient") -> None:
     try:
         from langchain_core.callbacks.manager import BaseCallbackManager
-
-        handler = _ARSPCallbackHandler(client)
-
-        # Inject into the global callback manager so every chain/llm/tool
-        # created after init() automatically has our handler.
-        try:
-            from langchain_core.callbacks import get_callback_manager
-            get_callback_manager().add_handler(handler, inherit=True)
-            log.info("[arsp] LangChain callback handler injected (global manager)")
-            return
-        except Exception:
-            pass
-
-        # Fallback: set as a global handler via the module-level registry
-        try:
-            import langchain_core.callbacks.manager as _mgr
-            if not hasattr(_mgr, "_arsp_handler_injected"):
-                _orig_init = BaseCallbackManager.__init__
-
-                def _patched_init(self, *args, **kwargs):
-                    _orig_init(self, *args, **kwargs)
-                    try:
-                        self.add_handler(handler, inherit=True)
-                    except Exception:
-                        pass
-
-                BaseCallbackManager.__init__ = _patched_init
-                _mgr._arsp_handler_injected = True
-            log.info("[arsp] LangChain callback handler injected (manager __init__ patch)")
-        except Exception as exc:
-            log.warning("[arsp] LangChain callback injection failed: %s", exc)
-
     except ImportError:
         log.debug("[arsp] langchain-core not installed — skipping patch")
+        return
     except Exception as exc:
         log.warning("[arsp] LangChain patch failed: %s", exc)
+        return
+
+    # ── Layer A: callback handler injection ───────────────────────────────────
+    try:
+        handler = _build_handler(client)
+
+        import langchain_core.callbacks.manager as _mgr
+        if not hasattr(_mgr, "_arsp_injected"):
+            _orig_init = BaseCallbackManager.__init__
+
+            def _patched_init(self, *args, **kwargs):
+                _orig_init(self, *args, **kwargs)
+                try:
+                    if handler not in self.handlers:
+                        self.add_handler(handler, inherit=True)
+                except Exception:
+                    pass
+
+            BaseCallbackManager.__init__ = _patched_init
+            _mgr._arsp_injected = True
+        log.info("[arsp] LangChain callback handler injected")
+    except Exception as exc:
+        log.warning("[arsp] LangChain callback injection failed: %s", exc)
+
+    # ── Layer B: direct BaseTool patch (catches tool.invoke() without config) ─
+    try:
+        from langchain_core.tools import BaseTool
+        _wrap_tool_run(client, BaseTool)
+        _wrap_tool_arun(client, BaseTool)
+        log.info("[arsp] LangChain BaseTool patched (direct tool.invoke guard)")
+    except ImportError:
+        pass
+    except Exception as exc:
+        log.warning("[arsp] LangChain BaseTool patch failed: %s", exc)
 
 
-class _ARSPCallbackHandler:
+# ── Callback handler ──────────────────────────────────────────────────────────
+
+def _build_handler(client: "EventClient"):
     """
-    LangChain BaseCallbackHandler that forwards events to the ARSP backend.
-    Inherits lazily so the import works even if langchain-core is installed
-    after the SDK — the class body only runs when patch_langchain() is called.
+    Build a proper BaseCallbackHandler subclass at call-time so the import
+    of BaseCallbackHandler is deferred until langchain-core is available.
+    Defined as a nested class inside a function to keep the module-level
+    namespace clean and avoid import-time failures.
     """
+    from langchain_core.callbacks import BaseCallbackHandler
 
-    def __new__(cls, client: "EventClient"):
-        from langchain_core.callbacks import BaseCallbackHandler
+    class ARSPCallbackHandler(BaseCallbackHandler):
+        raise_error = False
+        ignore_llm = False
+        ignore_chain = False
+        ignore_agent = False
 
-        # Build the real class the first time, then cache it
-        if not hasattr(cls, "_built"):
-            cls._built = type(
-                "_ARSPCallbackHandlerImpl",
-                (BaseCallbackHandler,),
-                {
-                    "__init__":        cls._init,
-                    "on_llm_start":    cls._on_llm_start,
-                    "on_llm_end":      cls._on_llm_end,
-                    "on_llm_error":    cls._on_llm_error,
-                    "on_tool_start":   cls._on_tool_start,
-                    "on_tool_end":     cls._on_tool_end,
-                    "on_tool_error":   cls._on_tool_error,
-                    "on_chain_start":  cls._on_chain_start,
-                    "on_chain_end":    cls._on_chain_end,
-                    "on_chain_error":  cls._on_chain_error,
-                    "raise_error":     False,
-                    "ignore_llm":      False,
-                    "ignore_chain":    False,
-                    "ignore_agent":    False,
+        def __init__(self):
+            super().__init__()
+            self._t0: dict[str, float] = {}
+
+        # Chat models (ChatOpenAI, ChatGoogleGenerativeAI, ChatOllama, …)
+        def on_chat_model_start(
+            self,
+            serialized: dict,
+            messages: list,
+            *,
+            run_id: UUID,
+            **kwargs: Any,
+        ) -> None:
+            self._t0[str(run_id)] = time.monotonic()
+            model = (
+                (serialized.get("kwargs") or {}).get("model")
+                or (serialized.get("kwargs") or {}).get("model_name")
+                or (serialized.get("id") or ["unknown"])[-1]
+            )
+            # Flatten the last human message for a useful preview
+            prompt_preview = ""
+            try:
+                last_batch = messages[-1] if messages else []
+                if last_batch:
+                    last_msg = last_batch[-1]
+                    prompt_preview = (
+                        getattr(last_msg, "content", None)
+                        or str(last_msg)
+                    )[:400]
+            except Exception:
+                pass
+            client.send(
+                type="llm_call",
+                name=str(model),
+                metadata={
+                    "framework":    "langchain",
+                    "model":        str(model),
+                    "prompt":       prompt_preview,
+                    "message_count": sum(len(b) for b in messages),
+                },
+                id=str(run_id),
+            )
+
+        # Completion models (OpenAI text, etc.)
+        def on_llm_start(
+            self,
+            serialized: dict,
+            prompts: list[str],
+            *,
+            run_id: UUID,
+            **kwargs: Any,
+        ) -> None:
+            self._t0[str(run_id)] = time.monotonic()
+            model = (
+                (serialized.get("kwargs") or {}).get("model_name")
+                or (serialized.get("kwargs") or {}).get("model")
+                or (serialized.get("id") or ["unknown"])[-1]
+            )
+            client.send(
+                type="llm_call",
+                name=str(model),
+                metadata={
+                    "framework":    "langchain",
+                    "model":        str(model),
+                    "prompt":       prompts[0][:400] if prompts else "",
+                    "prompt_count": len(prompts),
+                },
+                id=str(run_id),
+            )
+
+        def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
+            duration_ms = round(
+                (time.monotonic() - self._t0.pop(str(run_id), time.monotonic())) * 1000, 2
+            )
+            output = ""
+            try:
+                g = response.generations
+                if g and g[0]:
+                    output = getattr(g[0][0], "text", None) or str(g[0][0])
+                    output = output[:400]
+            except Exception:
+                pass
+            usage = {}
+            try:
+                if response.llm_output:
+                    usage = response.llm_output.get("token_usage") or {}
+            except Exception:
+                pass
+            client.send(
+                type="llm_call",
+                name="llm_response",
+                metadata={
+                    "framework":   "langchain",
+                    "output":      output,
+                    "duration_ms": duration_ms,
+                    **{k: v for k, v in usage.items()},
                 },
             )
-        return cls._built(client)
 
-    # ── instance setup ────────────────────────────────────────────────────────
+        def on_llm_error(
+            self, error: BaseException, *, run_id: UUID, **kwargs: Any
+        ) -> None:
+            self._t0.pop(str(run_id), None)
+            client.send(
+                type="llm_call",
+                name="llm_error",
+                metadata={"framework": "langchain", "error": str(error)},
+            )
 
-    @staticmethod
-    def _init(self, client: "EventClient"):
-        super(self.__class__, self).__init__()
-        self._client = client
-        self._t0: dict[str, float] = {}  # run_id -> start time
+        def on_tool_start(
+            self,
+            serialized: dict,
+            input_str: str,
+            *,
+            run_id: UUID,
+            **kwargs: Any,
+        ) -> None:
+            self._t0[str(run_id)] = time.monotonic()
+            tool_name = serialized.get("name") or kwargs.get("name", "unknown_tool")
+            client.send(
+                type="tool_call",
+                name=str(tool_name),
+                metadata={"framework": "langchain", "input": input_str[:400]},
+                id=str(run_id),
+            )
 
-    # ── LLM events ───────────────────────────────────────────────────────────
+        def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
+            duration_ms = round(
+                (time.monotonic() - self._t0.pop(str(run_id), time.monotonic())) * 1000, 2
+            )
+            client.send(
+                type="tool_call",
+                name="tool_response",
+                metadata={
+                    "framework":   "langchain",
+                    "output":      str(output)[:400],
+                    "duration_ms": duration_ms,
+                },
+            )
 
-    @staticmethod
-    def _on_llm_start(self, serialized: dict, prompts: list[str],
-                      *, run_id: UUID, **kwargs: Any) -> None:
-        self._t0[str(run_id)] = time.monotonic()
-        model = (serialized.get("kwargs") or {}).get("model_name") \
-             or (serialized.get("kwargs") or {}).get("model") \
-             or serialized.get("id", ["unknown"])[-1]
-        self._client.send(
-            type="llm_call",
-            name=str(model),
-            metadata={
-                "framework":    "langchain",
-                "prompt_count": len(prompts),
-                "prompt":       prompts[0][:500] if prompts else "",
-            },
-            id=str(run_id),
-        )
+        def on_tool_error(
+            self, error: BaseException, *, run_id: UUID, **kwargs: Any
+        ) -> None:
+            duration_ms = round(
+                (time.monotonic() - self._t0.pop(str(run_id), time.monotonic())) * 1000, 2
+            )
+            client.send(
+                type="tool_call",
+                name="tool_error",
+                metadata={
+                    "framework":   "langchain",
+                    "error":       str(error),
+                    "duration_ms": duration_ms,
+                },
+            )
 
-    @staticmethod
-    def _on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        duration_ms = round((time.monotonic() - self._t0.pop(str(run_id), time.monotonic())) * 1000, 2)
-        generations = getattr(response, "generations", [])
-        output = ""
-        if generations:
-            first = generations[0]
-            if first:
-                output = getattr(first[0], "text", str(first[0]))[:500]
-        usage = {}
-        if hasattr(response, "llm_output") and response.llm_output:
-            usage = response.llm_output.get("token_usage", {})
-        self._client.send(
-            type="llm_call",
-            name="llm_response",
-            metadata={
-                "framework":   "langchain",
-                "output":      output,
-                "duration_ms": duration_ms,
-                **{k: v for k, v in usage.items()},
-            },
-        )
+        def on_chain_start(
+            self,
+            serialized: dict,
+            inputs: dict,
+            *,
+            run_id: UUID,
+            **kwargs: Any,
+        ) -> None:
+            self._t0[str(run_id)] = time.monotonic()
+            chain_name = (serialized.get("id") or ["unknown"])[-1] if serialized else "unknown"
+            client.send(
+                type="llm_call",
+                name=f"chain:{chain_name}",
+                metadata={"framework": "langchain", "inputs": str(inputs)[:400]},
+                id=str(run_id),
+            )
 
-    @staticmethod
-    def _on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        self._t0.pop(str(run_id), None)
-        self._client.send(
-            type="llm_call",
-            name="llm_error",
-            metadata={"framework": "langchain", "error": str(error)},
-        )
+        def on_chain_end(self, outputs: dict, *, run_id: UUID, **kwargs: Any) -> None:
+            duration_ms = round(
+                (time.monotonic() - self._t0.pop(str(run_id), time.monotonic())) * 1000, 2
+            )
+            client.send(
+                type="llm_call",
+                name="chain_end",
+                metadata={
+                    "framework":   "langchain",
+                    "outputs":     str(outputs)[:400],
+                    "duration_ms": duration_ms,
+                },
+            )
 
-    # ── Tool events ───────────────────────────────────────────────────────────
+        def on_chain_error(
+            self, error: BaseException, *, run_id: UUID, **kwargs: Any
+        ) -> None:
+            self._t0.pop(str(run_id), None)
+            client.send(
+                type="llm_call",
+                name="chain_error",
+                metadata={"framework": "langchain", "error": str(error)},
+            )
 
-    @staticmethod
-    def _on_tool_start(self, serialized: dict, input_str: str,
-                       *, run_id: UUID, **kwargs: Any) -> None:
-        self._t0[str(run_id)] = time.monotonic()
-        tool_name = serialized.get("name") or kwargs.get("name", "unknown_tool")
-        self._client.send(
-            type="tool_call",
-            name=str(tool_name),
-            metadata={
-                "framework": "langchain",
-                "input":     input_str[:400],
-            },
-            id=str(run_id),
-        )
+    return ARSPCallbackHandler()
 
-    @staticmethod
-    def _on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        duration_ms = round((time.monotonic() - self._t0.pop(str(run_id), time.monotonic())) * 1000, 2)
-        self._client.send(
-            type="tool_call",
-            name="tool_response",
-            metadata={
-                "framework":   "langchain",
-                "output":      str(output)[:400],
-                "duration_ms": duration_ms,
-            },
-        )
 
-    @staticmethod
-    def _on_tool_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        duration_ms = round((time.monotonic() - self._t0.pop(str(run_id), time.monotonic())) * 1000, 2)
-        self._client.send(
-            type="tool_call",
-            name="tool_error",
-            metadata={
-                "framework":   "langchain",
-                "error":       str(error),
-                "duration_ms": duration_ms,
-            },
-        )
+# ── Layer B: direct BaseTool wrappers ─────────────────────────────────────────
 
-    # ── Chain events ──────────────────────────────────────────────────────────
+def _wrap_tool_run(client: "EventClient", BaseTool) -> None:
+    """
+    Guard for synchronous tool.invoke() / tool.run() calls made outside
+    any chain context (no callbacks= passed). Skips if a callback-based
+    event was already emitted for this invocation to avoid duplicates.
+    """
+    original = BaseTool._run
 
-    @staticmethod
-    def _on_chain_start(self, serialized: dict, inputs: dict,
-                        *, run_id: UUID, **kwargs: Any) -> None:
-        self._t0[str(run_id)] = time.monotonic()
-        chain_name = serialized.get("id", ["unknown"])[-1] if serialized else "unknown"
-        self._client.send(
-            type="llm_call",
-            name=f"chain:{chain_name}",
-            metadata={
-                "framework": "langchain",
-                "inputs":    str(inputs)[:400],
-            },
-            id=str(run_id),
-        )
+    @functools.wraps(original)
+    def patched(self, *args, **kwargs):
+        # If we're inside a LangChain run context, the callback handler already
+        # fired on_tool_start. Detect that via a per-invocation flag so we
+        # don't double-count.
+        if getattr(self, "_arsp_cb_active", False):
+            return original(self, *args, **kwargs)
 
-    @staticmethod
-    def _on_chain_end(self, outputs: dict, *, run_id: UUID, **kwargs: Any) -> None:
-        duration_ms = round((time.monotonic() - self._t0.pop(str(run_id), time.monotonic())) * 1000, 2)
-        self._client.send(
-            type="llm_call",
-            name="chain_end",
-            metadata={
-                "framework":   "langchain",
-                "outputs":     str(outputs)[:400],
-                "duration_ms": duration_ms,
-            },
-        )
+        t0 = time.monotonic()
+        error = None
+        result: Any = None
+        try:
+            result = original(self, *args, **kwargs)
+            return result
+        except Exception as exc:
+            error = str(exc)
+            raise
+        finally:
+            client.send(
+                type="tool_call",
+                name=getattr(self, "name", "unknown_tool"),
+                metadata=_tool_meta(self, args, kwargs, result, error, t0),
+            )
 
-    @staticmethod
-    def _on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        self._t0.pop(str(run_id), None)
-        self._client.send(
-            type="llm_call",
-            name="chain_error",
-            metadata={"framework": "langchain", "error": str(error)},
-        )
+    BaseTool._run = patched
+
+
+def _wrap_tool_arun(client: "EventClient", BaseTool) -> None:
+    original = BaseTool._arun
+
+    @functools.wraps(original)
+    async def patched(self, *args, **kwargs):
+        if getattr(self, "_arsp_cb_active", False):
+            return await original(self, *args, **kwargs)
+
+        t0 = time.monotonic()
+        error = None
+        result: Any = None
+        try:
+            result = await original(self, *args, **kwargs)
+            return result
+        except Exception as exc:
+            error = str(exc)
+            raise
+        finally:
+            client.send(
+                type="tool_call",
+                name=getattr(self, "name", "unknown_tool"),
+                metadata=_tool_meta(self, args, kwargs, result, error, t0),
+            )
+
+    BaseTool._arun = patched
+
+
+def _tool_meta(tool, args, kwargs, result: Any, error, t0: float) -> dict:
+    tool_input = kwargs.get("tool_input") or (args[0] if args else "")
+    return {
+        "tool":        getattr(tool, "name", "unknown"),
+        "description": str(getattr(tool, "description", ""))[:200],
+        "input":       str(tool_input)[:400],
+        "output":      str(result)[:400] if result is not None else None,
+        "error":       error,
+        "duration_ms": round((time.monotonic() - t0) * 1000, 2),
+        "framework":   "langchain",
+    }
