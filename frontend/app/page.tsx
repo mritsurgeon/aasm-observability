@@ -327,14 +327,36 @@ const RISK_FACTOR_META: Array<{
   icon: string;
   color: string;
   weight: number;
+  description: string;
 }> = [
-  { match: /external contact/i,  icon: "🌐", color: "text-orange-400", weight: 0.36 },
-  { match: /error rate/i,        icon: "⚠️",  color: "text-red-400",    weight: 0.30 },
-  { match: /high event volume/i, icon: "📊", color: "text-yellow-400", weight: 0.15 },
-  { match: /namespace/i,         icon: "🔄", color: "text-cyan-400",   weight: 0.10 },
-  { match: /llm/i,               icon: "🤖", color: "text-blue-400",   weight: 0.08 },
-  { match: /memory/i,            icon: "💾", color: "text-purple-400", weight: 0.05 },
-  { match: /off.hours/i,         icon: "🌙", color: "text-indigo-400", weight: 0.05 },
+  {
+    match: /external contact/i, icon: "🌐", color: "text-orange-400", weight: 0.36,
+    description: "The agent made outbound API or network calls. This is the highest-weight signal — it can indicate data exfiltration, C2 communication, or an agent reaching outside its expected scope. Review which endpoints were contacted and whether they were authorised.",
+  },
+  {
+    match: /error rate/i, icon: "⚠️", color: "text-red-400", weight: 0.30,
+    description: "A significant share of events resulted in errors. Elevated error rates can point to injection probing (deliberately malformed inputs), broken tool chains, or an agent operating outside its training distribution. Check the metadata.error fields for patterns.",
+  },
+  {
+    match: /high event volume/i, icon: "📊", color: "text-yellow-400", weight: 0.15,
+    description: "More than 30 events fired in a single session. High volume may indicate a runaway loop, automated scraping, or an agent that was not given adequate stop conditions. Compare against typical session sizes for this agent.",
+  },
+  {
+    match: /namespace/i, icon: "🔄", color: "text-cyan-400", weight: 0.10,
+    description: "Tools from more than 3 distinct namespaces were invoked. Broad tool access increases the blast radius of a compromised or misbehaving agent. An agent that only needs file I/O should not be touching network or system namespaces.",
+  },
+  {
+    match: /llm/i, icon: "🤖", color: "text-blue-400", weight: 0.08,
+    description: "One or more LLM inference calls were made. LLM usage adds risk via prompt injection (malicious content in retrieved context hijacking the model's instructions) and potential leakage of sensitive data included in prompts.",
+  },
+  {
+    match: /memory/i, icon: "💾", color: "text-purple-400", weight: 0.05,
+    description: "The agent wrote to persistent memory or a vector store. Memory writes can be used to persist poisoned context across sessions, store exfiltrated data, or influence future agent reasoning in unintended ways.",
+  },
+  {
+    match: /off.hours/i, icon: "🌙", color: "text-indigo-400", weight: 0.05,
+    description: "Activity occurred outside normal business hours (06:00–22:00 UTC). Legitimate scheduled agents are expected; unplanned off-hours activity from interactive agents warrants manual review.",
+  },
 ];
 
 function parseFactor(text: string) {
@@ -463,21 +485,26 @@ function RiskTab() {
                     <RiskScoreBar score={s.risk_score} />
                   </div>
 
-                  {/* Factor badges — each reasoning item gets an icon + color */}
+                  {/* Factor cards — each with label, raw value, and security context */}
                   {s.reasoning.length > 0 && (
                     <div>
-                      <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-1.5">Triggered factors</p>
-                      <div className="flex flex-wrap gap-2">
+                      <p className="text-[10px] text-gray-600 uppercase tracking-wide mb-2">Triggered factors</p>
+                      <div className="space-y-2">
                         {s.reasoning.map((r, i) => {
                           const f = parseFactor(r);
                           return (
-                            <span
+                            <div
                               key={i}
-                              className={`inline-flex items-center gap-1 px-2 py-1 rounded-full border border-white/10 bg-white/5 font-mono text-[10px] ${f.color}`}
+                              className="flex gap-3 rounded border border-white/10 bg-white/5 px-3 py-2"
                             >
-                              <span>{f.icon}</span>
-                              <span>{r}</span>
-                            </span>
+                              <span className="text-base leading-none flex-shrink-0 mt-0.5">{f.icon}</span>
+                              <div className="min-w-0">
+                                <div className={`font-mono text-[10px] font-semibold ${f.color}`}>{r}</div>
+                                {f.description && (
+                                  <div className="text-[10px] text-gray-500 mt-1 leading-relaxed">{f.description}</div>
+                                )}
+                              </div>
+                            </div>
                           );
                         })}
                       </div>
@@ -534,7 +561,7 @@ interface MemoryRow {
   agent_id:  string;
   key:       string;
   payload:   string;
-  source:    "chain" | "event";
+  source:    "chain" | "event" | "vectordb";
   active?:   boolean;
 }
 
@@ -549,9 +576,10 @@ function MemoryTab() {
     setError(null);
     Promise.all([
       api.memoryChain().catch(() => ({ head_id: null, count: 0, chain: [] })),
-      api.queryEvents({ type: "memory", limit: 100 }).catch(() => [] as EventRecord[]),
+      api.queryEvents({ type: "memory",    limit: 100 }).catch(() => [] as EventRecord[]),
+      api.queryEvents({ type: "vector_db", limit: 100 }).catch(() => [] as EventRecord[]),
     ])
-      .then(([chain, pgEvents]) => {
+      .then(([chain, pgEvents, vectorEvents]) => {
         const chainRows: MemoryRow[] = chain.chain.map((e: MemoryEntry) => ({
           id:        e.id,
           timestamp: e.timestamp,
@@ -571,11 +599,19 @@ function MemoryTab() {
             : "(no payload)",
           source:    "event" as const,
         }));
+        const vectorRows: MemoryRow[] = (vectorEvents as EventRecord[]).map((e) => ({
+          id:        e.id,
+          timestamp: e.timestamp,
+          agent_id:  e.agent_id,
+          key:       (e.metadata.operation as string) || e.name,
+          payload:   JSON.stringify(e.metadata),
+          source:    "vectordb" as const,
+        }));
 
         // Deduplicate by id, sort newest first
         const seen = new Set<string>();
         const merged: MemoryRow[] = [];
-        [...chainRows, ...eventRows]
+        [...chainRows, ...eventRows, ...vectorRows]
           .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
           .forEach((r) => { if (!seen.has(r.id)) { seen.add(r.id); merged.push(r); } });
         setRows(merged);
@@ -659,6 +695,11 @@ function MemoryTab() {
                     {row.source === "event" && (
                       <span className="px-1.5 py-0.5 rounded border text-[9px] font-mono bg-blue-950 border-blue-800 text-blue-400">
                         sdk
+                      </span>
+                    )}
+                    {row.source === "vectordb" && (
+                      <span className="px-1.5 py-0.5 rounded border text-[9px] font-mono bg-cyan-950 border-cyan-800 text-cyan-400">
+                        vectordb
                       </span>
                     )}
                   </div>

@@ -68,6 +68,19 @@ def patch_langchain(client: "EventClient") -> None:
     except Exception as exc:
         log.warning("[arsp] LangChain BaseTool patch failed: %s", exc)
 
+    # ── Layer C: InMemoryChatMessageHistory patch ──────────────────────────────
+    # InMemoryChatMessageHistory is a plain Python class — it never fires
+    # callbacks, so Layer A is blind to every message added to it.
+    # Patch add_message / add_messages directly.
+    try:
+        from langchain_core.chat_history import InMemoryChatMessageHistory
+        _wrap_chat_history(client, InMemoryChatMessageHistory)
+        log.info("[arsp] InMemoryChatMessageHistory patched")
+    except ImportError:
+        pass
+    except Exception as exc:
+        log.warning("[arsp] InMemoryChatMessageHistory patch failed: %s", exc)
+
 
 # ── Callback handler ──────────────────────────────────────────────────────────
 
@@ -348,6 +361,64 @@ def _wrap_tool_arun(client: "EventClient", BaseTool) -> None:
             )
 
     BaseTool._arun = patched
+
+
+def _wrap_chat_history(client: "EventClient", cls) -> None:
+    """
+    Patch InMemoryChatMessageHistory so every message written to RAM is
+    captured as a 'memory' event.  Patches add_message (single) and
+    add_messages (batch, used by RunnableWithMessageHistory).
+    """
+    if getattr(cls, "_arsp_patched", False):
+        return
+
+    orig_add = cls.add_message
+    orig_add_many = getattr(cls, "add_messages", None)
+
+    @functools.wraps(orig_add)
+    def patched_add(self, message: Any) -> None:
+        orig_add(self, message)
+        try:
+            client.send(
+                type="memory",
+                name="chat_message",
+                metadata={
+                    "framework": "langchain",
+                    "source":    "InMemoryChatMessageHistory",
+                    "role":      getattr(message, "type", "unknown"),
+                    "content":   str(getattr(message, "content", message))[:400],
+                    "history_length": len(getattr(self, "messages", [])),
+                },
+            )
+        except Exception:
+            pass
+
+    cls.add_message = patched_add
+
+    if orig_add_many is not None:
+        @functools.wraps(orig_add_many)
+        def patched_add_many(self, messages: Any) -> None:
+            orig_add_many(self, messages)
+            try:
+                msgs = list(messages)
+                for message in msgs:
+                    client.send(
+                        type="memory",
+                        name="chat_message",
+                        metadata={
+                            "framework": "langchain",
+                            "source":    "InMemoryChatMessageHistory",
+                            "role":      getattr(message, "type", "unknown"),
+                            "content":   str(getattr(message, "content", message))[:400],
+                            "history_length": len(getattr(self, "messages", [])),
+                        },
+                    )
+            except Exception:
+                pass
+
+        cls.add_messages = patched_add_many
+
+    cls._arsp_patched = True
 
 
 def _tool_meta(tool, args, kwargs, result: Any, error, t0: float) -> dict:
