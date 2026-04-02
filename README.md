@@ -103,6 +103,23 @@ arsp.track_vector_db(
 
 ---
 
+## Compatibility Matrix
+
+AASM Zero-Config support relies on a layered interception strategy (Framework Callbacks -> Model SDK Patches -> Network Patches).
+
+| Framework / Architecture | LLM Calls | Tool Executions | Agent Memory | Network APIs | Setup |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **LangChain** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | `arsp.init()` |
+| **CrewAI** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | `arsp.init()` |
+| **OpenFang / Claw** | ✅ Yes | ✅ Yes | 🟨 Partial | ✅ Yes | `arsp.init()` |
+| **Vanilla Python Loop** | ✅ Yes | 🟨 Manual* | 🟨 Manual* | ✅ Yes | `arsp.init()` |
+| **LlamaIndex** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | `arsp.init()` |
+| **Raw REST APIs** | 🟨 Manual | 🟨 Manual | 🟨 Manual | ✅ Yes | `arsp.init()` |
+
+*\*Manual fallback: For raw loops without framework abstractions, use `@arsp.track` decorators or manual `arsp.track()` calls.*
+
+---
+
 ## Event Schema
 
 All events are sent as `POST /events`:
