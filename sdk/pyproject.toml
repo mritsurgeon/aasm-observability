@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arsp-sdk"
+version = "0.1.0"
+description = "Zero-config auto-instrumentation SDK for the ARSP Agent Observability Platform"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["httpx>=0.24"]
+
+[project.optional-dependencies]
+openai    = ["openai>=1.0"]
+langchain = ["langchain-core>=0.1"]
+crewai    = ["crewai>=0.1"]
+all       = ["openai>=1.0", "langchain-core>=0.1", "crewai>=0.1"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["arsp_sdk*"]

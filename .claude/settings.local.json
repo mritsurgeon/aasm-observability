@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "/Users/ian/AASM - AI Agent Security Monitoring "
+    ],
+    "allow": [
+      "Read(//Users/ian/AASM - AI Agent Security Monitoring /backend/app/**)"
+    ]
+  }
+}
