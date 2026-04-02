@@ -8,29 +8,29 @@ A graph-native observability and security platform for AI agents. Zero-config te
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Your AI Agent (OpenAI / LangChain / CrewAI)                    │
+│           Your AI Agent (OpenAI / LangChain / CrewAI)           │
 │  pip install ./sdk  →  arsp.init()  →  auto-patched             │
-└─────────────────────────┬───────────────────────────────────────┘
-                           │  POST /events  (JSON over HTTP)
-                           ▼
+└────────────────────────────────┬────────────────────────────────┘
+                                 │  POST /events  (JSON over HTTP)
+                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  FastAPI Backend  (port 8000)                                   │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ /ingest  │  │ /tools   │  │ /graph   │  │ /timeline     │  │
-│  │ /events  │  │ /risk    │  │ /heatmap │  │ /health       │  │
-│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘  │
+│                  FastAPI Backend  (port 8000)                   │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐    │
+│  │ /ingest  │  │ /tools   │  │ /graph   │  │ /timeline     │    │
+│  │ /events  │  │ /risk    │  │ /heatmap │  │ /health       │    │
+│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘    │
 │       │                │                                        │
-│  ┌────▼────┐      ┌────▼────────────────────────────────────┐  │
-│  │PostgreSQL│      │  Neo4j                                  │  │
-│  │ events  │      │  Agent→Session→Tool/LLM/Memory/VectorDB │  │
-│  │ tools   │      │  ExternalSystem/Namespace nodes         │  │
-│  └─────────┘      └─────────────────────────────────────────┘  │
+│  ┌────▼─────┐      ┌───▼────────────────────────────────────┐    │
+│  │PostgreSQL│      │ Neo4j                                  │    │
+│  │ events   │      │ Agent→Session→Tool/LLM/Memory/VectorDB │    │
+│  │ tools    │      │ ExternalSystem/Namespace nodes         │    │
+│  └──────────┘      └────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
-                           │  REST + WebSocket
-                           ▼
+                                 │  REST + WebSocket
+                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Next.js Dashboard  (port 3000)                                 │
-│  Overview · Graph · Tools · Timeline · Heatmap · Risk · Memory │
+│                  Next.js Dashboard  (port 3000)                 │
+│  Overview · Graph · Tools · Timeline · Heatmap · Risk · Memory  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -71,13 +71,18 @@ OpenAI, LangChain, and CrewAI calls are captured automatically from this point f
 
 ## SDK Auto-Instrumentation
 
-| Framework | What is patched | Event type emitted |
-|-----------|----------------|--------------------|
-| OpenAI | `Completions.create` | `llm_call` |
-| LangChain | `BaseTool._run` / `_arun` | `tool_call` |
-| CrewAI | `Task.execute_sync` / `Task.execute` | `tool_call` |
-| Manual | `arsp.track(...)` | any |
-| Manual | `arsp.track_vector_db(...)` | `vector_db` |
+| Framework / SDK | What is patched | Event type emitted |
+|-----------------|----------------|--------------------|
+| **OpenAI** | `Completions.create` | `llm_call` |
+| **Gemini** | `GenerativeModel.generate_content` | `llm_call` |
+| **Ollama** | `chat` / `generate` | `llm_call` |
+| **LangChain** | `BaseCallbackHandler` (Every LLM/Tool/Chain) | `llm_call`, `tool_call` |
+| **CrewAI** | `Task.execute` / `Agent.execute_task` | `tool_call` |
+| **ChromaDB** | `Collection` (add, query, get, delete) | `vector_db` |
+| **Pinecone** | `Index` (query, upsert, delete, fetch) | `vector_db` |
+| **HTTPX** | `Client.send` / `AsyncClient.send` | `network` |
+| **Requests** | `Session.send` | `network` |
+| **Manual** | `arsp.track(...)` or `track_vector_db` | any |
 
 ### Manual tracking
 
