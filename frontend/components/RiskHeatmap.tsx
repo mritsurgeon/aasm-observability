@@ -59,9 +59,12 @@ export function RiskHeatmap({ eventCount }: Props) {
     const CELL_W  = Math.max(24, Math.floor((W - PAD_L - PAD_R) / COLS));
     const H       = PAD_T + ROWS * CELL_H + PAD_B;
 
-    const colorScale = d3.scaleSequential()
-      .domain([0, Math.max(data.max_risk, 0.01)])
-      .interpolator(d3.interpolateRgb("#1f2937", "#ef4444"));
+    const riskColor = (risk: number): string => {
+      if (risk <= 0) return "#1f2937";
+      if (risk < 0.4) return d3.interpolateRgb("#1f2937", "#eab308")(risk / 0.4);
+      if (risk < 0.7) return d3.interpolateRgb("#eab308", "#ef4444")((risk - 0.4) / 0.3);
+      return "#ef4444";
+    };
 
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
@@ -96,7 +99,7 @@ export function RiskHeatmap({ eventCount }: Props) {
       // Cells
       row.cells.forEach((cell, ci) => {
         const cx   = PAD_L + ci * CELL_W;
-        const fill = cell.count === 0 ? "#0d1117" : colorScale(cell.risk_score);
+        const fill = cell.count === 0 ? "#0d1117" : riskColor(cell.risk_score);
 
         const rect = svg.append("rect")
           .attr("x", cx + 1).attr("y", cy + 1)
@@ -135,21 +138,40 @@ export function RiskHeatmap({ eventCount }: Props) {
       });
     });
 
-    // Color legend
-    const legendW = 120;
+    // Color legend with 3-stop gradient at risk thresholds
+    const legendW = 160;
     const legendX = W - PAD_R - legendW;
     const legendY = H - PAD_B + 10;
     const defs = svg.append("defs");
     const grad = defs.append("linearGradient").attr("id", "hm-grad");
     grad.append("stop").attr("offset", "0%").attr("stop-color", "#1f2937");
+    grad.append("stop").attr("offset", "40%").attr("stop-color", "#eab308");
+    grad.append("stop").attr("offset", "70%").attr("stop-color", "#ef4444");
     grad.append("stop").attr("offset", "100%").attr("stop-color", "#ef4444");
+
     svg.append("rect")
       .attr("x", legendX).attr("y", legendY).attr("width", legendW).attr("height", 8)
       .attr("fill", "url(#hm-grad)").attr("rx", 2);
+
+    // Threshold tick marks at 0.4 and 0.7
+    const t40x = legendX + legendW * 0.4;
+    const t70x = legendX + legendW * 0.7;
+    [{ x: t40x, label: "0.4" }, { x: t70x, label: "0.7" }].forEach(({ x, label }) => {
+      svg.append("line")
+        .attr("x1", x).attr("y1", legendY - 2)
+        .attr("x2", x).attr("y2", legendY + 10)
+        .attr("stroke", "#4b5563").attr("stroke-width", 1);
+      svg.append("text")
+        .attr("x", x).attr("y", legendY + 20)
+        .attr("text-anchor", "middle")
+        .attr("font-size", "8px").attr("fill", "#4b5563")
+        .text(label);
+    });
+
     svg.append("text").attr("x", legendX).attr("y", legendY + 20)
-      .attr("font-size", "9px").attr("fill", "#4b5563").text("low risk");
+      .attr("font-size", "9px").attr("fill", "#4b5563").text("low");
     svg.append("text").attr("x", legendX + legendW).attr("y", legendY + 20)
-      .attr("text-anchor", "end").attr("font-size", "9px").attr("fill", "#4b5563").text("high risk");
+      .attr("text-anchor", "end").attr("font-size", "9px").attr("fill", "#4b5563").text("critical");
 
   }, [data]);
 

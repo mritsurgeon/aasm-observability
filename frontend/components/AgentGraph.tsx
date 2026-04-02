@@ -77,11 +77,12 @@ function extraCount(label: string, data: Record<string, unknown>): number {
 
 // ── Custom node component ──────────────────────────────────────────────────────
 function GraphNodeComponent({ data }: { data: Record<string, unknown> }) {
-  const label   = data.label as string;
-  const display = data.display as string;
-  const colors  = LABEL_COLORS[label] || fallback();
-  const keyMeta = getKeyMeta(label, data);
-  const extras  = extraCount(label, data);
+  const label       = data.label as string;
+  const display     = data.display as string;
+  const colors      = LABEL_COLORS[label] || fallback();
+  const keyMeta     = getKeyMeta(label, data);
+  const extras      = extraCount(label, data);
+  const isCollapsed = !!data.isCollapsed;
 
   return (
     <div
@@ -122,6 +123,14 @@ function GraphNodeComponent({ data }: { data: Record<string, unknown> }) {
           title={keyMeta}
         >
           {keyMeta}
+        </div>
+      )}
+      {isCollapsed && (
+        <div
+          className="mt-1 text-[9px] font-mono text-center rounded px-1 py-0.5 leading-none"
+          style={{ background: colors.border + "22", color: colors.border }}
+        >
+          ▶ collapsed
         </div>
       )}
     </div>
@@ -423,6 +432,50 @@ function DetailPanel({ node, onClose }: { node: Node | null; onClose: () => void
   );
 }
 
+// ── Visible graph computation ─────────────────────────────────────────────────
+function computeVisibleGraph(
+  allNodes: Node[],
+  allEdges: Edge[],
+  collapsedNodes: Set<string>,
+  activeFilters: Set<string>,
+): { visibleNodes: Node[]; visibleEdges: Edge[] } {
+  // Nodes hidden by collapse: direct children (via any edge) of a collapsed node
+  const hiddenIds = new Set<string>();
+  allEdges.forEach((e) => {
+    if (collapsedNodes.has(e.source)) hiddenIds.add(e.target);
+  });
+
+  let visibleIds: Set<string>;
+
+  if (activeFilters.size > 0) {
+    // Primary: nodes whose label is in the filter set (and not hidden by collapse)
+    const primary = new Set(
+      allNodes
+        .filter((n) => activeFilters.has((n.data as Record<string, unknown>).label as string) && !hiddenIds.has(n.id))
+        .map((n) => n.id)
+    );
+    // Immediate neighbors of primary nodes for context
+    const neighbors = new Set<string>();
+    allEdges.forEach((e) => {
+      if (primary.has(e.source) && !hiddenIds.has(e.target)) neighbors.add(e.target);
+      if (primary.has(e.target) && !hiddenIds.has(e.source)) neighbors.add(e.source);
+    });
+    visibleIds = new Set(Array.from(primary).concat(Array.from(neighbors)));
+  } else {
+    visibleIds = new Set(allNodes.filter((n) => !hiddenIds.has(n.id)).map((n) => n.id));
+  }
+
+  const visibleNodes = allNodes
+    .filter((n) => visibleIds.has(n.id))
+    .map((n) => ({ ...n, data: { ...n.data, isCollapsed: collapsedNodes.has(n.id) } }));
+
+  const visibleEdges = allEdges.filter(
+    (e) => visibleIds.has(e.source) && visibleIds.has(e.target)
+  );
+
+  return { visibleNodes, visibleEdges };
+}
+
 // ── Component ──────────────────────────────────────────────────────────────────
 interface Props {
   /** Pass latest WS event count so graph refreshes when new data arrives */
@@ -437,6 +490,11 @@ export function AgentGraph({ eventCount }: Props) {
   const [error, setError]                    = useState<string | null>(null);
   const [counts, setCounts]                  = useState({ nodes: 0, edges: 0 });
   const lastCountRef                          = useRef(-1);
+  const allNodesRef                           = useRef<Node[]>([]);
+  const allEdgesRef                           = useRef<Edge[]>([]);
+  const [collapsedNodes, setCollapsedNodes]  = useState<Set<string>>(new Set());
+  const [activeFilters, setActiveFilters]    = useState<Set<string>>(new Set());
+  const [dataVersion, setDataVersion]        = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -444,15 +502,16 @@ export function AgentGraph({ eventCount }: Props) {
       const data = await api.graphOverview();
       if (data.error) { setError(data.error); return; }
       const { nodes, edges } = computeLayout(data.nodes, data.edges);
-      setRfNodes(nodes);
-      setRfEdges(edges);
+      allNodesRef.current = nodes;
+      allEdgesRef.current = edges;
+      setDataVersion((v) => v + 1);
       setCounts(data.counts);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, [setRfNodes, setRfEdges]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
@@ -462,6 +521,19 @@ export function AgentGraph({ eventCount }: Props) {
     const t = setTimeout(load, 1500);
     return () => clearTimeout(t);
   }, [eventCount, load]);
+
+  // Recompute visible nodes/edges whenever data, filters, or collapse state changes
+  useEffect(() => {
+    if (allNodesRef.current.length === 0) return;
+    const { visibleNodes, visibleEdges } = computeVisibleGraph(
+      allNodesRef.current,
+      allEdgesRef.current,
+      collapsedNodes,
+      activeFilters,
+    );
+    setRfNodes(visibleNodes);
+    setRfEdges(visibleEdges);
+  }, [collapsedNodes, activeFilters, dataVersion, setRfNodes, setRfEdges]);
 
   if (loading) {
     return (
@@ -480,7 +552,7 @@ export function AgentGraph({ eventCount }: Props) {
     );
   }
 
-  if (rfNodes.length === 0) {
+  if (allNodesRef.current.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-gray-500 text-sm gap-2">
         <span className="text-2xl">◎</span>
@@ -497,17 +569,44 @@ export function AgentGraph({ eventCount }: Props) {
         {(["Agent","Session","Tool","LLMModel","VectorDB","ExternalSystem","Memory","Namespace"] as const).map((label) => {
           const c     = LABEL_COLORS[label];
           const count = rfNodes.filter((n) => (n.data as Record<string, unknown>).label === label).length;
-          if (!count) return null;
+          if (!count && activeFilters.size === 0) return null;
+          const isActive = activeFilters.has(label);
           return (
-            <span
+            <button
               key={label}
-              style={{ borderColor: c.border, color: c.text }}
-              className="px-2 py-0.5 rounded border bg-gray-900/80 font-mono"
+              title={`${isActive ? "Remove" : "Filter to"} ${label} nodes (Shift+click for multi-select)`}
+              style={{
+                borderColor: c.border,
+                color: isActive ? c.text : "#9ca3af",
+                opacity: activeFilters.size > 0 && !isActive ? 0.45 : 1,
+              }}
+              className="px-2 py-0.5 rounded border bg-gray-900/80 font-mono cursor-pointer transition-all hover:opacity-100 select-none"
+              onClick={(e) => {
+                setActiveFilters((prev) => {
+                  const next = new Set(prev);
+                  if (e.shiftKey) {
+                    if (next.has(label)) next.delete(label);
+                    else next.add(label);
+                  } else {
+                    if (next.size === 1 && next.has(label)) next.clear();
+                    else { next.clear(); next.add(label); }
+                  }
+                  return next;
+                });
+              }}
             >
               {ICONS[label]} {count} {label}
-            </span>
+            </button>
           );
         })}
+        {(activeFilters.size > 0 || collapsedNodes.size > 0) && (
+          <button
+            className="px-2 py-0.5 rounded border border-gray-600 text-gray-500 bg-gray-900/80 font-mono hover:border-gray-400 hover:text-gray-300 transition-colors"
+            onClick={() => { setActiveFilters(new Set()); setCollapsedNodes(new Set()); }}
+          >
+            ✕ reset
+          </button>
+        )}
       </div>
 
       <ReactFlow
@@ -515,6 +614,14 @@ export function AgentGraph({ eventCount }: Props) {
         onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
         onNodeClick={(_, node) => setSelectedNode(node)}
         onPaneClick={() => setSelectedNode(null)}
+        onNodeDoubleClick={(_, node) => {
+          setCollapsedNodes((prev) => {
+            const next = new Set(prev);
+            if (next.has(node.id)) next.delete(node.id);
+            else next.add(node.id);
+            return next;
+          });
+        }}
         nodeTypes={nodeTypes}
         fitView fitViewOptions={{ padding: 0.15 }}
         minZoom={0.15} maxZoom={3}
@@ -529,8 +636,9 @@ export function AgentGraph({ eventCount }: Props) {
 
       <DetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} />
 
-      <div className="absolute bottom-3 left-3 z-10 text-[10px] text-gray-600 font-mono">
-        {counts.nodes} nodes · {counts.edges} edges
+      <div className="absolute bottom-3 left-3 z-10 text-[10px] text-gray-600 font-mono space-x-3">
+        <span>{counts.nodes} nodes · {counts.edges} edges</span>
+        <span className="text-gray-700">· click label to filter · dbl-click node to collapse</span>
       </div>
     </div>
   );

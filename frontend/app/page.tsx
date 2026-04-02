@@ -697,6 +697,7 @@ export default function Dashboard() {
   const [seedEvents, setSeedEvents]     = useState<WsEvent[]>([]);
   const [seedLoaded, setSeedLoaded]     = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<WsEvent | null>(null);
+  const [activeFilter, setActiveFilter] = useState<string | null>(null);
 
   // Seed overview with REST data so it shows even before new WS events arrive
   useEffect(() => {
@@ -727,6 +728,11 @@ export default function Dashboard() {
   const errorEvents    = events.filter((e) => (e.data?.metadata as Record<string, unknown>)?.error);
   const agentIds       = new Set(events.map((e) => e.data?.agent_id).filter(Boolean));
   const sessionIds     = new Set(events.map((e) => e.data?.session_id).filter(Boolean));
+
+  const filteredEvents = activeFilter
+    ? events.filter((e) => e.type === activeFilter)
+    : events;
+  const errorRate = events.length > 0 ? errorEvents.length / events.length : 0;
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
@@ -791,10 +797,46 @@ export default function Dashboard() {
             ) : hasData ? (
               <>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <StatCard label="Active Agents"  value={agentIds.size}         accent="blue" />
-                  <StatCard label="Sessions"        value={sessionIds.size}       accent="blue" />
-                  <StatCard label="Tool Calls"      value={toolCallEvents.length} accent="yellow" />
-                  <StatCard label="LLM Calls"       value={llmCallEvents.length}  accent="green" />
+                  <StatCard label="Active Agents" value={agentIds.size}          accent="blue" />
+                  <StatCard label="Sessions"      value={sessionIds.size}        accent="blue" />
+                  <StatCard
+                    label="Tool Calls"
+                    value={toolCallEvents.length}
+                    accent="yellow"
+                    active={activeFilter === "tool_call"}
+                    onClick={() => setActiveFilter(activeFilter === "tool_call" ? null : "tool_call")}
+                  />
+                  <StatCard
+                    label="LLM Calls"
+                    value={llmCallEvents.length}
+                    accent="green"
+                    active={activeFilter === "llm_call"}
+                    onClick={() => setActiveFilter(activeFilter === "llm_call" ? null : "llm_call")}
+                  />
+                </div>
+
+                {/* System Health */}
+                <div className="bg-gray-900 border border-gray-700 rounded-lg px-4 py-2.5 flex items-center gap-3 text-xs">
+                  <span className="text-gray-500 font-semibold uppercase tracking-wide text-[10px]">System Health</span>
+                  <span className={`flex items-center gap-1.5 font-mono ${
+                    errorRate > 0.2 ? "text-red-400" : errorRate > 0.05 ? "text-yellow-400" : "text-green-400"
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${
+                      errorRate > 0.2 ? "bg-red-400" : errorRate > 0.05 ? "bg-yellow-400 animate-pulse" : "bg-green-400 animate-pulse"
+                    }`} />
+                    {errorRate > 0.2 ? "Degraded" : errorRate > 0.05 ? "Warning" : "Nominal"}
+                  </span>
+                  <span className="text-gray-600">·</span>
+                  <span className="text-gray-500">{agentIds.size} agent{agentIds.size !== 1 ? "s" : ""}</span>
+                  <span className="text-gray-500">{sessionIds.size} session{sessionIds.size !== 1 ? "s" : ""}</span>
+                  {activeFilter && (
+                    <button
+                      className="ml-auto text-blue-400 hover:underline font-mono"
+                      onClick={() => setActiveFilter(null)}
+                    >
+                      clear filter ×
+                    </button>
+                  )}
                 </div>
 
                 {/* Live event stream */}
@@ -803,10 +845,12 @@ export default function Dashboard() {
                     <span className={`w-2 h-2 rounded-full ${connected ? "bg-green-400 animate-pulse" : "bg-gray-500"}`} />
                     <span className="text-sm font-medium text-gray-300">Live Event Stream</span>
                     <span className="text-xs text-gray-600 ml-2">click any row for details</span>
-                    <span className="ml-auto text-xs text-gray-500">{events.length} total</span>
+                    <span className="ml-auto text-xs text-gray-500">
+                      {filteredEvents.length}{activeFilter ? ` ${activeFilter}` : ""} events
+                    </span>
                   </div>
                   <div className="divide-y divide-gray-800 max-h-96 overflow-y-auto">
-                    {[...events].reverse().slice(0, 100).map((ev, i) => {
+                    {[...filteredEvents].reverse().slice(0, 100).map((ev, i) => {
                       const hasError = !!(ev.data?.metadata as Record<string, unknown>)?.error;
                       const isSelected = selectedEvent === ev;
                       return (

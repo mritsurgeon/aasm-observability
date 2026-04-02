@@ -112,7 +112,7 @@ export function SequenceTimeline({ eventCount }: Props) {
     const PAD_L  = 200;
     const PAD_R  = 32;
     const PAD_T  = 44;
-    const PAD_B  = 48;
+    const PAD_B  = 32;
     const H      = PAD_T + sessions.length * ROW_H + PAD_B;
 
     const allTs = sessions.flatMap((s) =>
@@ -261,31 +261,6 @@ export function SequenceTimeline({ eventCount }: Props) {
       });
     });
 
-    // Legend
-    const legendY = H - PAD_B + 20;
-    let lx = PAD_L;
-    Object.entries(TYPE_COLOR).forEach(([type, color]) => {
-      svg.append("circle").attr("cx", lx + 5).attr("cy", legendY).attr("r", 4).attr("fill", color);
-      svg.append("text")
-        .attr("x", lx + 13).attr("y", legendY + 4)
-        .attr("font-size", "9px").attr("fill", "#6b7280").attr("font-family", "monospace")
-        .text(type);
-      lx += type.length * 6 + 26;
-    });
-
-    // Cluster legend
-    svg.append("circle")
-      .attr("cx", lx + 5).attr("cy", legendY).attr("r", 6)
-      .attr("fill", "#6b7280").attr("fill-opacity", 0.3)
-      .attr("stroke", "#6b7280").attr("stroke-dasharray", "3 2");
-    svg.append("text")
-      .attr("x", lx + 5).attr("y", legendY + 4)
-      .attr("text-anchor", "middle").attr("font-size", "7px").attr("fill", "white").attr("font-weight", "bold")
-      .text("+N");
-    svg.append("text")
-      .attr("x", lx + 15).attr("y", legendY + 4)
-      .attr("font-size", "9px").attr("fill", "#6b7280").attr("font-family", "monospace")
-      .text("cluster");
   }, [sessions]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -320,6 +295,23 @@ export function SequenceTimeline({ eventCount }: Props) {
 
       <div className="w-full overflow-x-auto rounded-lg bg-gray-950 border border-gray-800">
         <svg ref={svgRef} className="w-full" />
+      </div>
+
+      {/* Legend */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 px-1 text-[10px] font-mono text-gray-500">
+        {Object.entries(TYPE_COLOR).map(([type, color]) => (
+          <span key={type} className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />
+            {type}
+          </span>
+        ))}
+        <span className="flex items-center gap-1.5">
+          <span
+            className="w-3 h-3 rounded-full flex-shrink-0"
+            style={{ border: "1.5px dashed #6b7280", background: "rgba(107,114,128,0.15)" }}
+          />
+          cluster
+        </span>
       </div>
 
       {/* Single-event detail */}
