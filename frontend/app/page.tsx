@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { ClientTime } from "@/components/ClientTime";
 import { StatCard } from "@/components/StatCard";
@@ -570,6 +570,20 @@ function MemoryTab() {
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
   const [selected, setSelected] = useState<MemoryRow | null>(null);
+  const { events: wsEvents }    = useWebSocket();
+
+  // Auto-refresh when a memory or vector_db event arrives via WebSocket
+  const lastMemoryTs = useRef<string>("");
+  useEffect(() => {
+    const latest = [...wsEvents].reverse().find(
+      (e) => e.type === "memory" || e.type === "vector_db"
+    );
+    if (latest && latest.timestamp !== lastMemoryTs.current) {
+      lastMemoryTs.current = latest.timestamp;
+      load();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsEvents]);
 
   const load = useCallback(() => {
     setLoading(true);

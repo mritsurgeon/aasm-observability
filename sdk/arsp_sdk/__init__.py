@@ -36,7 +36,6 @@ def init(
     agent_id: str,
     endpoint: str = "http://localhost:8000",
     *,
-    session_id: Optional[str] = None,
     # ── Framework patches (rich context: tools, chains, agent intent) ─────────
     patch_langchain: bool = True,
     patch_crewai:    bool = True,
@@ -67,7 +66,9 @@ def init(
     global _client
 
     set_agent_id(agent_id)
-    set_session_id(session_id or str(uuid.uuid4()))
+    # No session set here — sessions are created lazily on the first
+    # Crew.kickoff() (or manually via arsp.new_session()). This keeps
+    # the SDK init event out of customer sessions entirely.
 
     _client = EventClient(endpoint=endpoint, agent_id=agent_id)
 

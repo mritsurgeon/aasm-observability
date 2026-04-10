@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 import httpx
 
-from arsp_sdk._context import get_agent_id, get_session_id
+from arsp_sdk._context import get_agent_id, get_session_id, get_crew_session
 
 _STOP = object()  # sentinel to drain and stop the worker
 
@@ -22,6 +22,11 @@ class EventClient:
     def __init__(self, endpoint: str, agent_id: str) -> None:
         self.endpoint   = endpoint.rstrip("/")
         self.agent_id   = agent_id
+        # Stable fallback session used when a worker thread has no ContextVar
+        # session set (CrewAI spawns OS threads that don't inherit ContextVars).
+        # This keeps orphaned-thread events in one session rather than creating
+        # a new random session per event.
+        self._default_session_id = str(uuid.uuid4())
         self._q: queue.Queue = queue.Queue(maxsize=50_000)
         self._thread = threading.Thread(
             target=self._worker, daemon=True, name="arsp-sender"
@@ -88,7 +93,7 @@ class EventClient:
         return {
             "id":         id,
             "agent_id":   get_agent_id()   or self.agent_id,
-            "session_id": get_session_id() or str(uuid.uuid4()),
+            "session_id": get_session_id() or get_crew_session() or self._default_session_id,
             "type":       type,
             "name":       name,
             "timestamp":  datetime.now(timezone.utc).isoformat(),
